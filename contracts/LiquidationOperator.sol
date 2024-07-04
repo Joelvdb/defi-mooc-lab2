@@ -134,9 +134,16 @@ interface IUniswapV2Pair {
 
 contract LiquidationOperator is IUniswapV2Callee {
     uint8 public constant health_factor_decimals = 18;
-
     // TODO: define constants used in the contract including ERC-20 tokens, Uniswap Pairs, Aave lending pools, etc. */
-    //    *** Your code here ***
+    IERC20 constant WBTC = IERC20(0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599);
+    IWETH constant WETH = IWETH(0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2);
+    IERC20 constant USDT = IERC20(0xdAC17F958D2ee523a2206206994597C13D831ec7);
+    IUniswapV2Factory constant uniswapV2Factory = IUniswapV2Factory(0x5C69bEe701ef814a2B6a3EDD4B1652CB9cc5aA6f);
+    //aave lending pool v2
+    ILendingPool constant lendingPool = ILendingPool(0x7d2768dE32b0b80b7a3454c06BdAc94A69DDc7A9);
+    address constant target = 0x59CE4a2AC5bC3f5F225439B2993b86B42f6d3e9F;
+    IUniswapV2Pair immutable pairWbtcUsdt = IUniswapV2Pair(uniswapV2Factory.getPair(address(WBTC), address(USDT)));
+    IUniswapV2Pair immutable pairWbtcWeth = IUniswapV2Pair(uniswapV2Factory.getPair(address(WBTC), address(WETH)));
     // END TODO
 
     // some helper function, it is totally fine if you can finish the lab without using these function
@@ -148,6 +155,7 @@ contract LiquidationOperator is IUniswapV2Callee {
         uint256 reserveIn,
         uint256 reserveOut
     ) internal pure returns (uint256 amountOut) {
+        console.log("amountIn: %d, reserveIn: %d, reserveOut: %d", amountIn, reserveIn, reserveOut);
         require(amountIn > 0, "UniswapV2Library: INSUFFICIENT_INPUT_AMOUNT");
         require(
             reserveIn > 0 && reserveOut > 0,
@@ -184,29 +192,48 @@ contract LiquidationOperator is IUniswapV2Callee {
     }
 
     // TODO: add a `receive` function so that you can withdraw your WETH
-    //   *** Your code here ***
+    receive() external payable {}
     // END TODO
 
     // required by the testing script, entry for your liquidation call
     function operate() external {
         // TODO: implement your liquidation logic
-
+        uint256 totalCollateralETH;
+        uint256 totalDebtETH;
+        uint256 availableBorrowsETH;
+        uint256 currentLiquidationThreshold;
+        uint256 ltv;
+        uint256 healthFactor;
         // 0. security checks and initializing variables
         //    *** Your code here ***
 
         // 1. get the target user account data & make sure it is liquidatable
-        //    *** Your code here ***
-
+        (totalCollateralETH,totalDebtETH,availableBorrowsETH,currentLiquidationThreshold,ltv,healthFactor) = lendingPool.getUserAccountData(target);
+        require(
+            healthFactor < (10 ** health_factor_decimals),
+            "Cannot liquidate; health factor must be below 1"
+        );
         // 2. call flash swap to liquidate the target user
         // based on https://etherscan.io/tx/0xac7df37a43fab1b130318bbb761861b8357650db2e2c6493b73d6da3d9581077
         // we know that the target user borrowed USDT with WBTC as collateral
         // we should borrow USDT, liquidate the target user and get the WBTC, then swap WBTC to repay uniswap
         // (please feel free to develop other workflows as long as they liquidate the target user successfully)
-        //    *** Your code here ***
-
+        (uint256 reserve_WBTC_Pool1, uint256 reserve_USDT_Pool1, ) = pairWbtcUsdt.getReserves(); // Pool1
+        (uint256 reserve_WBTC_Pool2, uint256 reserve_WETH_Pool2, ) = pairWbtcWeth.getReserves();
+        uint256 outWbtc = getAmountOut(totalDebtETH, reserve_WETH_Pool2, reserve_WBTC_Pool2);
+        uint256 outUsdt = getAmountOut(outWbtc, reserve_WBTC_Pool1, reserve_USDT_Pool1);
+        console.log("outWbtc: %d, outUsdt: %d", outWbtc, outUsdt);
+        console.log("totalDebtETH: %d, reserve_WETH_Pool2: %d, reserve_WBTC_Pool2: %d", totalDebtETH, reserve_WETH_Pool2, reserve_WBTC_Pool2);
+        console.log(address(this));
+        pairWbtcUsdt.swap(0, 100000000, address(this), ":)");
+        console.log("totalDebtETH: %d, reserve_WETH_Pool2: %d, reserve_WBTC_Pool2: %d", totalDebtETH, reserve_WETH_Pool2, reserve_WBTC_Pool2);
         // 3. Convert the profit into ETH and send back to sender
         //    *** Your code here ***
-
+        uint balance = WETH.balanceOf(address(this));
+        WETH.withdraw(balance);
+        console.log("balance: %d", balance);
+        payable(msg.sender).transfer(address(this).balance);
+        console.log("balance: %d", balance);
         // END TODO
     }
 
@@ -220,16 +247,26 @@ contract LiquidationOperator is IUniswapV2Callee {
         // TODO: implement your liquidation logic
 
         // 2.0. security checks and initializing variables
-        //    *** Your code here ***
-
+        assert(msg.sender == address(pairWbtcUsdt));
+        (uint256 reserve_WBTC_Pool1, uint256 reserve_USDT_Pool1, ) = pairWbtcUsdt.getReserves(); // Pool1
+        (uint256 reserve_WBTC_Pool2, uint256 reserve_WETH_Pool2, ) = pairWbtcWeth.getReserves(); // Pool2
+        USDT.approve(address(lendingPool), amount1);
+        console.log("amount1: %d", amount1);
         // 2.1 liquidate the target user
-        //    *** Your code here ***
-
+        lendingPool.liquidationCall(address(WBTC), address(USDT), target, amount1, false);
+        uint collateral_WBTC = WBTC.balanceOf(address(this));
+        console.log("collateral_WBTC: %d", collateral_WBTC);
         // 2.2 swap WBTC for other things or repay directly
-        //    *** Your code here ***
+        WBTC.approve(address(pairWbtcWeth), collateral_WBTC);
+        console.log("collateral_WBTC: %d", collateral_WBTC);
 
+        uint amountOut_WETH = getAmountOut(collateral_WBTC, reserve_WBTC_Pool2, reserve_WETH_Pool2);
+        pairWbtcWeth.swap(0, amountOut_WETH, address(this), "");
+        console.log("amountOut_WETH: %d", amountOut_WETH);
         // 2.3 repay
-        //    *** Your code here ***
+        uint256 repay_WETH = getAmountIn(amount1, reserve_WBTC_Pool1, reserve_USDT_Pool1);
+        WETH.approve(address(pairWbtcWeth), repay_WETH);
+        console.log("repay_WETH: %d", repay_WETH);
         
         // END TODO
     }
